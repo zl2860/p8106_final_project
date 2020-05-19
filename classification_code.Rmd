@@ -1,0 +1,224 @@
+---
+title: "code"
+author: "Zongchao Liu"
+date: "5/18/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+```
+
+Goals: classification models 无脑速推神兽预测/has_mega_evolution/属性
+mehotds:保留下来的method都是亲测收敛，有效的，每一个response variable 对应的models不一样
+
+# 预测is_legendary
+## Import data
+
+```{r import data,message=FALSE}
+set.seed(886)
+data = read_csv('./data/pokemon/pokemon.csv') %>% 
+  janitor::clean_names() %>%
+  #select(-total) %>% #-hp,-attack,-defense,-sp_atk,-sp_def,-speed
+  select(-number,-name,-type_2,-egg_group_2,-egg_group_1) %>%
+  mutate(pr_male = ifelse(is.na(pr_male), -1, pr_male),
+         generation = factor(generation),
+         is_legendary = ifelse(is_legendary == TRUE, "Y", "N"),
+         is_legendary = factor(is_legendary,levels = c("N","Y")),
+         has_mega_evolution = ifelse(has_mega_evolution == TRUE, "Y", "N"),
+         has_mega_evolution = factor(has_mega_evolution,levels = c("N","Y")))
+
+index = sample(1:nrow(data),replace = F) 
+data = data[index,] # resampled data
+
+# particiton 8 : 2
+train.obs = sample_frac(data,size = 0.8, replace = F) # training set 
+
+validation.obs = sample_frac(data,size = 0.2, replace = F) # validation  set 
+
+
+train_x = model.matrix(is_legendary ~ . , train.obs)[,-1]
+train_y = train.obs$is_legendary
+val_x = model.matrix(is_legendary ~. ,validation.obs)[,-1]
+val_y = validation.obs$is_legendary
+```
+
+## try different models
+
+### train settings
+```{r}
+ctrl = trainControl(method = "repeatedcv",
+                    repeats = 5,
+                    summaryFunction = twoClassSummary,
+                    classProbs = T)
+```
+
+### Logistic regression
+
+```{r,warning=FALSE}
+log.fit = train(x = train_x,
+                y = factor(train_y),
+                method = "glm",
+                metric = "ROC",
+                trControl = ctrl)
+log.pred = predict(log.fit, newdata = val_x)
+sum(val_y == log.pred)/length(val_y) # accuracy
+
+```
+
+### classification tree
+
+```{r}
+library(rpart)
+set.seed(886)
+tree.fit = train(is_legendary ~ ., train.obs,
+                 method = "rpart",
+                 tuneGrid = data.frame(cp = exp(seq(-6,-3,len = 30))),
+                 trControl = ctrl,
+                 metric = "ROC")
+
+ggplot(tree.fit,highlight = T)
+tree.fit$bestTune
+rpart.plot::rpart.plot(tree.fit$finalModel) #Y = is legendary
+tree.pred = predict(tree.fit,newdata = validation.obs)
+sum(tree.pred == validation.obs$is_legendary)/length(tree.pred) # accuracy
+```
+
+boosting & bagging 先不做了，一棵树已经无敌了，而且树可以interpret。干脆在report直接反省原因（假装不知道游戏公司可能提前设置好了变量关系，后来发现不太对劲上网一查官方果然有数值设定）
+
+
+### SVM
+
+```{r}
+set.seed(886)
+
+svm.fit.linear = train(is_legendary ~ .,
+                       data = train.obs,
+                       method = "svmLinear2",
+                       preProcess = c("center", "scale"),
+                       tuneGrid = data.frame(cost = exp(seq(-6, 5, len =60))),
+                       trControl = ctrl
+                       )
+
+svm.fit.linear.pred = predict(svm.fit.linear,newdata = validation.obs)
+sum(svm.fit.linear.pred == validation.obs$is_legendary)/length(svm.fit.linear.pred) # accuracy
+```
+
+上述各种model都无敌，所以最好不要做is_legendary
+
+## 预测has_mega_evolution
+
+```{r}
+train_x.e = model.matrix(has_mega_evolution ~ . , train.obs)[,-1]
+train_y.e = train.obs$has_mega_evolution
+val_x.e = model.matrix(has_mega_evolution ~. ,validation.obs)[,-1]
+val_y.e = validation.obs$has_mega_evolution
+```
+
+### logistic
+
+```{r,warning=FALSE}
+set.seed(886)
+log.fit.e = train(x = train_x.e,
+                y = factor(train_y.e),
+                method = "glm",
+                metric = "ROC",
+                trControl = ctrl)
+log.fit.e.pred = predict(log.fit.e, newdata = val_x.e)
+sum(val_y.e == log.fit.e.pred)/length(val_y) # accuracy
+
+```
+
+### classification tree
+
+```{r}
+set.seed(886)
+tree.fit.e = train(has_mega_evolution ~ ., train.obs,
+                 method = "rpart",
+                 tuneGrid = data.frame(cp = exp(seq(-6,-3,len = 30))),
+                 trControl = ctrl,
+                 metric = "ROC")
+
+ggplot(tree.fit.e,highlight = T)
+tree.fit.e$bestTune
+rpart.plot::rpart.plot(tree.fit.e$finalModel) #Y = is legendary
+tree.fit.e.pred = predict(tree.fit.e,newdata = validation.obs)
+sum(tree.fit.e.pred == val_y.e)/length(tree.fit.e.pred)
+
+```
+
+就两类pokemon有mega进化的几率稍微高，可interpret
+
+## 预测pokemon type
+
+### random forest
+
+```{r}
+# process data
+train_x.t = model.matrix(type_1 ~ . , train.obs)[,-1]
+train_y.t = train.obs$type_1
+val_x.t = model.matrix(type_1 ~. ,validation.obs)[,-1]
+val_y.t = validation.obs$type_1
+unique(train_y.t) # 一共18种属性
+```
+
+```{r}
+ctrl.forest = trainControl(method = "cv",
+                    number = 10,
+                    summaryFunction = multiClassSummary,
+                    classProbs = T)
+# randomforest
+rf.grid = expand.grid(mtry = 1:5,
+                       splitrule = "gini",
+                       min.node.size = 1:30)
+
+rf.fit = train(type_1 ~ .,
+               data = train.obs,
+               method = "ranger",
+               tuneGrid = rf.grid,
+               trControl = ctrl.forest
+               )
+
+ggplot(rf.fit,highlight = T) +
+  labs(title = "Tuning Parameters for the Random Forest Model") +
+  theme(plot.title = element_text(hjust = .5)) +
+  theme_minimal +
+  ggsci::scale_fill_lancet()
+
+#prediction
+rf.pred = predict(rf.fit, newdata = validation.obs)
+sum(rf.pred == validation.obs$type_1) / length(rf.pred) # accuracy 0.84 
+```
+可以再调整一下parameters,30以后的node size，test集表现的不如30以前的
+
+# gradient boosting model
+这个先别run了，跑到宕机都出不来结果
+
+```{r,eval=FALSE}
+
+gbmB.grid = expand.grid(n.trees = c(2000),
+                        interaction.depth = 1:5,
+                        shrinkage = c(0.001),
+                        n.minobsinnode = 30)
+gbm.fit = train(type_1 ~ . ,
+                train.obs,
+                method = "gbm",
+                tuneGrid = gbmB.grid,
+                verbose = F)
+
+ggplot(gbm.fit,highlight = T) +
+  labs(title = "Tuning Parameters for the Gradient Boosting Model") +
+  theme(plot.title = element_text(hjust = .5)) +
+  theme_minimal +
+  ggsci::scale_fill_lancet()
+
+rf.pred = predict(rf.fit, newdata = validation.obs)
+sum(rf.pred == validation.obs$type_1) / length(rf.pred) # accuracy 0.84 
+```
+
+
+
+
+
